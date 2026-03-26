@@ -1,0 +1,37 @@
+name: Weekly News Generator
+
+on:
+  schedule:
+    # 每周一 00:00 UTC = 北京时间 08:00
+    - cron: "0 0 * * 1"
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate weekly news document
+        run: python scripts/generate_news.py
+
+      - name: Commit and push report
+        run: |
+          git config user.name "WeeklyNews Bot"
+          git config user.email "actions@github.com"
+          git add reports/
+          git diff --cached --quiet || git commit -m "📰 每周新闻简报 $(date +'%Y-%m-%d')"
+          git push
