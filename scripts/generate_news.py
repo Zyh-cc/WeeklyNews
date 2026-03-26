@@ -164,6 +164,113 @@ def translate_to_chinese(text):
         return ""
 
 
+# ── 豆瓣书单抓取 ─────────────────────────────────────────────────
+DOUBAN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Referer": "https://book.douban.com/",
+}
+
+DOUBAN_CHART_URLS = [
+    "https://book.douban.com/chart?subcat=G&time=week&type=rank",
+    "https://book.douban.com/chart?subcat=G",
+    "https://book.douban.com/chart",
+]
+
+
+def fetch_douban_book_detail(url):
+    """抓取豆瓣单本书详情页，返回 {author, category, rating, intro}"""
+    info = {"author": "", "category": "", "rating": "", "intro": ""}
+    try:
+        resp = requests.get(url, headers=DOUBAN_HEADERS, timeout=10)
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        info_div = soup.select_one("#info")
+        if info_div:
+            text = info_div.get_text(" ", strip=True)
+            # 提取作者
+            author_match = re.search(r"作者[:：]\s*([^\n]+?)(?:\s*出版|$)", text)
+            if author_match:
+                info["author"] = author_match.group(1).strip()[:60]
+            # 提取出版社/类别作为 fallback
+            pub_match = re.search(r"出版社[:：]\s*([^\s]+)", text)
+            if pub_match:
+                info["category"] = pub_match.group(1).strip()
+
+        # 豆瓣标签作为分类
+        tags = soup.select(".tags-body a")
+        if tags:
+            info["category"] = " / ".join(t.get_text(strip=True) for t in tags[:4])
+
+        # 评分
+        rating_el = soup.select_one(".ll.rating_num")
+        if rating_el:
+            info["rating"] = rating_el.get_text(strip=True)
+
+        # 简介
+        intro_el = soup.select_one("#link-report .intro") or soup.select_one(".related_info .intro")
+        if intro_el:
+            paras = intro_el.find_all("p")
+            intro_text = " ".join(p.get_text(strip=True) for p in paras if p.get_text(strip=True))
+            info["intro"] = intro_text[:400] if intro_text else ""
+
+        time.sleep(0.8)
+    except Exception as e:
+        print(f"    [警告] 书籍详情抓取失败 {url}: {e}")
+    return info
+
+
+def fetch_douban_weekly_books(top_n=5):
+    """抓取豆瓣每周书榜 Top N"""
+    books = []
+    for chart_url in DOUBAN_CHART_URLS:
+        try:
+            resp = requests.get(chart_url, headers=DOUBAN_HEADERS, timeout=10)
+            if resp.status_code != 200:
+                continue
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            # 尝试多种选择器
+            items = (
+                soup.select(".media.clearfix") or
+                soup.select("li.media") or
+                soup.select(".chart-dashed-list li")
+            )
+            if not items:
+                continue
+
+            for item in items[:top_n]:
+                title_el = item.select_one("h2 a") or item.select_one("a[title]")
+                if not title_el:
+                    continue
+                title = title_el.get_text(strip=True)
+                link = title_el.get("href", "")
+
+                # 尝试从列表页获取基础信息
+                meta_el = item.select_one(".color-gray") or item.select_one("p.author")
+                meta_text = meta_el.get_text(" ", strip=True) if meta_el else ""
+
+                print(f"    📖 {title[:40]}...")
+                detail = fetch_douban_book_detail(link) if link else {}
+
+                books.append({
+                    "title": title,
+                    "link": link,
+                    "author": detail.get("author") or meta_text[:60],
+                    "category": detail.get("category", ""),
+                    "rating": detail.get("rating", ""),
+                    "intro": detail.get("intro", ""),
+                })
+
+            if books:
+                break  # 成功拿到数据就不继续尝试
+        except Exception as e:
+            print(f"  [警告] 豆瓣榜单抓取失败 {chart_url}: {e}")
+
+    return books
+
+
 # ── 生成 Word 文档 ────────────────────────────────────────────────
 def add_horizontal_rule(doc):
     p = doc.add_paragraph()
@@ -179,7 +286,54 @@ def add_horizontal_rule(doc):
     set_para_spacing(p, before_pt=0, after_pt=0)
 
 
-def build_document(sections_data, week_str, date_str):
+def render_book_section(doc, books):
+    """在文档末尾渲染豆瓣书单板块"""
+    sec_p = doc.add_paragraph()
+    set_para_spacing(sec_p, before_pt=18, after_pt=8)
+    sec_run = sec_p.add_run("📚 每周阅读推荐 · 豆瓣书榜 Top 5")
+    set_run_font(sec_run, size_pt=14, bold=True, color=(0x70, 0x30, 0xA0))
+
+    if not books:
+        np = doc.add_paragraph()
+        r = np.add_run("（本周暂无数据，请稍后查看豆瓣读书）")
+        set_run_font(r, size_pt=10, color=(0x99, 0x99, 0x99))
+        add_horizontal_rule(doc)
+        return
+
+    for i, book in enumerate(books, 1):
+        # 书名
+        title_p = doc.add_paragraph()
+        set_para_spacing(title_p, before_pt=12, after_pt=3)
+        t_run = title_p.add_run(f"{i}.  {book['title']}")
+        set_run_font(t_run, size_pt=12, bold=True, color=(0x1A, 0x1A, 0x1A))
+
+        # 元信息行：作者 / 分类 / 评分
+        meta_parts = []
+        if book.get("author"):
+            meta_parts.append(f"作者：{book['author']}")
+        if book.get("category"):
+            meta_parts.append(f"分类：{book['category']}")
+        if book.get("rating"):
+            meta_parts.append(f"豆瓣评分：{book['rating']}")
+        if meta_parts:
+            meta_p = doc.add_paragraph()
+            meta_p.paragraph_format.left_indent = Cm(0.8)
+            set_para_spacing(meta_p, before_pt=0, after_pt=4)
+            m_run = meta_p.add_run("  ·  ".join(meta_parts))
+            set_run_font(m_run, size_pt=9, color=(0x66, 0x66, 0x66))
+
+        # 内容简介
+        if book.get("intro"):
+            intro_p = doc.add_paragraph()
+            intro_p.paragraph_format.left_indent = Cm(0.8)
+            set_para_spacing(intro_p, before_pt=0, after_pt=8)
+            i_run = intro_p.add_run(book["intro"])
+            set_run_font(i_run, size_pt=10, color=(0x33, 0x33, 0x33))
+
+    add_horizontal_rule(doc)
+
+
+def build_document(sections_data, week_str, date_str, books=None):
     doc = Document()
 
     # 页面边距
@@ -256,12 +410,15 @@ def build_document(sections_data, week_str, date_str):
 
         add_horizontal_rule(doc)
 
+    # 书单板块
+    render_book_section(doc, books or [])
+
     # 页脚
     footer_p = doc.add_paragraph()
     footer_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     set_para_spacing(footer_p, before_pt=12, after_pt=0)
     r = footer_p.add_run(
-        f"来源：BBC News · Reuters · The New York Times · The Guardian  ·  生成日期：{date_str}"
+        f"来源：BBC News · Reuters · NYT · The Guardian · 豆瓣读书  ·  生成日期：{date_str}"
     )
     set_run_font(r, size_pt=8, color=(0xAA, 0xAA, 0xAA))
 
@@ -296,8 +453,12 @@ def main():
             })
         sections_data[section_name] = processed
 
+    print(f"\n📚 抓取豆瓣每周书榜...")
+    books = fetch_douban_weekly_books(top_n=5)
+    print(f"  共获取 {len(books)} 本书")
+
     print(f"\n📄 生成 Word 文档...")
-    doc = build_document(sections_data, week_str, date_str)
+    doc = build_document(sections_data, week_str, date_str, books=books)
     output_path = os.path.join(output_dir, filename)
     doc.save(output_path)
     print(f"✅ 已保存: {output_path}")
