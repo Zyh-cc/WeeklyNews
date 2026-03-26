@@ -14,8 +14,8 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
 # ── 字体设置 ──────────────────────────────────────────────────────
-EN_FONT = "Calibri"
-CN_FONT = "Microsoft YaHei"  # Windows 打开时使用微软雅黑
+EN_FONT = "Times New Roman"
+CN_FONT = "SimSun"  # 宋体
 
 
 def set_run_font(run, size_pt, bold=False, color=None, en_font=EN_FONT, cn_font=CN_FONT):
@@ -85,6 +85,14 @@ ARTICLES_PER_SECTION = 5
 SUMMARY_MAX_CHARS = 800
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; WeeklyNewsBot/1.0)"}
 
+URL_SOURCE_MAP = {
+    "bbci.co.uk": "BBC News",
+    "bbc.co.uk": "BBC News",
+    "reuters.com": "Reuters",
+    "nytimes.com": "The New York Times",
+    "theguardian.com": "The Guardian",
+}
+
 
 # ── 抓取正文 ──────────────────────────────────────────────────────
 def fetch_full_text(url, fallback_summary):
@@ -111,12 +119,20 @@ def clean_html(text):
     return text
 
 
+def source_from_url(url):
+    for domain, name in URL_SOURCE_MAP.items():
+        if domain in url:
+            return name
+    return ""
+
+
 def fetch_articles(urls, limit):
     articles = []
     seen_titles = set()
     for url in urls:
         if len(articles) >= limit:
             break
+        source = source_from_url(url)
         try:
             feed = feedparser.parse(url)
             for entry in feed.entries:
@@ -128,10 +144,11 @@ def fetch_articles(urls, limit):
                 seen_titles.add(title)
                 rss_summary = clean_html(entry.get("summary", entry.get("description", "")))
                 link = entry.get("link", "")
-                # 尝试抓取正文，失败则用 RSS 摘要
                 full_text = fetch_full_text(link, rss_summary) if link else rss_summary[:SUMMARY_MAX_CHARS]
-                articles.append({"title": title, "summary": full_text, "link": link})
-                time.sleep(0.3)  # 避免请求过快
+                # 来源优先用 RSS 自带的 source 字段
+                entry_source = entry.get("source", {}).get("title", "") or source
+                articles.append({"title": title, "summary": full_text, "link": link, "source": entry_source})
+                time.sleep(0.3)
         except Exception as e:
             print(f"  [警告] 抓取 {url} 失败: {e}")
     return articles[:limit]
@@ -290,7 +307,7 @@ def render_book_section(doc, books):
     """在文档末尾渲染豆瓣书单板块"""
     sec_p = doc.add_paragraph()
     set_para_spacing(sec_p, before_pt=18, after_pt=8)
-    sec_run = sec_p.add_run("📚 每周阅读推荐 · 豆瓣书榜 Top 5")
+    sec_run = sec_p.add_run("📚 每周阅读推荐 · 豆瓣书榜 Top 10")
     set_run_font(sec_run, size_pt=14, bold=True, color=(0x70, 0x30, 0xA0))
 
     if not books:
@@ -305,7 +322,8 @@ def render_book_section(doc, books):
         title_p = doc.add_paragraph()
         set_para_spacing(title_p, before_pt=12, after_pt=3)
         t_run = title_p.add_run(f"{i}.  {book['title']}")
-        set_run_font(t_run, size_pt=12, bold=True, color=(0x1A, 0x1A, 0x1A))
+        set_run_font(t_run, size_pt=14, bold=True, color=(0x1A, 0x1A, 0x1A),
+                     en_font="Times New Roman", cn_font="SimSun")
 
         # 元信息行：作者 / 分类 / 评分
         meta_parts = []
@@ -380,33 +398,46 @@ def build_document(sections_data, week_str, date_str, books=None):
             continue
 
         for i, art in enumerate(articles, 1):
-            # 英文标题
+            # 英文标题（Times New Roman，字号加大）
             en_p = doc.add_paragraph()
-            set_para_spacing(en_p, before_pt=10, after_pt=2)
+            set_para_spacing(en_p, before_pt=12, after_pt=2)
             en_run = en_p.add_run(f"{i}.  {art['en_title']}")
-            set_run_font(en_run, size_pt=11, bold=True, color=(0x1A, 0x1A, 0x1A))
+            set_run_font(en_run, size_pt=13, bold=True, color=(0x1A, 0x1A, 0x1A),
+                         en_font="Times New Roman", cn_font="SimSun")
 
-            # 中文标题
+            # 中文标题（宋体，字号加大）
             cn_p = doc.add_paragraph()
             set_para_spacing(cn_p, before_pt=0, after_pt=6)
             cn_run = cn_p.add_run(f"     {art['cn_title']}")
-            set_run_font(cn_run, size_pt=11, bold=True, color=(0x2E, 0x74, 0xB5))
+            set_run_font(cn_run, size_pt=13, bold=True, color=(0x2E, 0x74, 0xB5),
+                         en_font="Times New Roman", cn_font="SimSun")
 
-            # 英文正文
+            # 英文正文（Times New Roman）
             if art["en_summary"]:
                 en_body = doc.add_paragraph()
                 en_body.paragraph_format.left_indent = Cm(0.8)
                 set_para_spacing(en_body, before_pt=0, after_pt=4)
                 r = en_body.add_run(art["en_summary"])
-                set_run_font(r, size_pt=10, color=(0x33, 0x33, 0x33))
+                set_run_font(r, size_pt=10, color=(0x33, 0x33, 0x33),
+                             en_font="Times New Roman", cn_font="SimSun")
 
-            # 中文正文
+            # 中文正文（宋体）
             if art["cn_summary"]:
                 cn_body = doc.add_paragraph()
                 cn_body.paragraph_format.left_indent = Cm(0.8)
-                set_para_spacing(cn_body, before_pt=0, after_pt=10)
+                set_para_spacing(cn_body, before_pt=0, after_pt=6)
                 r = cn_body.add_run(art["cn_summary"])
-                set_run_font(r, size_pt=10, color=(0x33, 0x33, 0x33))
+                set_run_font(r, size_pt=10, color=(0x33, 0x33, 0x33),
+                             en_font="Times New Roman", cn_font="SimSun")
+
+            # 来源标注
+            if art.get("source"):
+                src_p = doc.add_paragraph()
+                src_p.paragraph_format.left_indent = Cm(0.8)
+                set_para_spacing(src_p, before_pt=0, after_pt=10)
+                src_run = src_p.add_run(f"来源：{art['source']}")
+                set_run_font(src_run, size_pt=8, color=(0xAA, 0xAA, 0xAA),
+                             en_font="Times New Roman", cn_font="SimSun")
 
         add_horizontal_rule(doc)
 
@@ -450,11 +481,12 @@ def main():
                 "cn_title": cn_title,
                 "en_summary": art["summary"],
                 "cn_summary": cn_summary,
+                "source": art.get("source", ""),
             })
         sections_data[section_name] = processed
 
     print(f"\n📚 抓取豆瓣每周书榜...")
-    books = fetch_douban_weekly_books(top_n=5)
+    books = fetch_douban_weekly_books(top_n=10)
     print(f"  共获取 {len(books)} 本书")
 
     print(f"\n📄 生成 Word 文档...")
