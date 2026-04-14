@@ -196,11 +196,28 @@ DOUBAN_CHART_URLS = [
 ]
 
 
+def _douban_get(url, retries=3, backoff=2):
+    """带退避重试的 requests.get，专用于豆瓣请求"""
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, headers=DOUBAN_HEADERS, timeout=10)
+            if resp.status_code == 200:
+                return resp
+            print(f"  [重试] {url} 返回 {resp.status_code}，第 {attempt + 1}/{retries} 次")
+        except Exception as e:
+            print(f"  [重试] {url} 异常: {e}，第 {attempt + 1}/{retries} 次")
+        if attempt < retries - 1:
+            time.sleep(backoff * (attempt + 1))
+    return None
+
+
 def fetch_douban_book_detail(url):
     """抓取豆瓣单本书详情页，返回 {author, category, rating, intro}"""
     info = {"author": "", "category": "", "rating": "", "intro": ""}
     try:
-        resp = requests.get(url, headers=DOUBAN_HEADERS, timeout=10)
+        resp = _douban_get(url)
+        if resp is None:
+            return info
         soup = BeautifulSoup(resp.text, "lxml")
 
         info_div = soup.select_one("#info")
@@ -243,8 +260,8 @@ def fetch_douban_weekly_books(top_n=5):
     books = []
     for chart_url in DOUBAN_CHART_URLS:
         try:
-            resp = requests.get(chart_url, headers=DOUBAN_HEADERS, timeout=10)
-            if resp.status_code != 200:
+            resp = _douban_get(chart_url)
+            if resp is None:
                 continue
             soup = BeautifulSoup(resp.text, "lxml")
 
