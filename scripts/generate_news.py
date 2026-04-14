@@ -196,113 +196,138 @@ DOUBAN_CHART_URLS = [
 ]
 
 
-def _douban_get(url, retries=3, backoff=2):
-    """带退避重试的 requests.get，专用于豆瓣请求"""
-    for attempt in range(retries):
-        try:
-            resp = requests.get(url, headers=DOUBAN_HEADERS, timeout=10)
-            if resp.status_code == 200:
-                return resp
-            print(f"  [重试] {url} 返回 {resp.status_code}，第 {attempt + 1}/{retries} 次")
-        except Exception as e:
-            print(f"  [重试] {url} 异常: {e}，第 {attempt + 1}/{retries} 次")
-        if attempt < retries - 1:
-            time.sleep(backoff * (attempt + 1))
-    return None
-
-
-def fetch_douban_book_detail(url):
+def fetch_douban_book_detail(url, max_retries=3):
     """抓取豆瓣单本书详情页，返回 {author, category, rating, intro}"""
     info = {"author": "", "category": "", "rating": "", "intro": ""}
-    try:
-        resp = _douban_get(url)
-        if resp is None:
-            return info
-        soup = BeautifulSoup(resp.text, "lxml")
 
-        info_div = soup.select_one("#info")
-        if info_div:
-            text = info_div.get_text(" ", strip=True)
-            # 提取作者
-            author_match = re.search(r"作者[:：]\s*([^\n]+?)(?:\s*出版|$)", text)
-            if author_match:
-                info["author"] = author_match.group(1).strip()[:60]
-            # 提取出版社/类别作为 fallback
-            pub_match = re.search(r"出版社[:：]\s*([^\s]+)", text)
-            if pub_match:
-                info["category"] = pub_match.group(1).strip()
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, headers=DOUBAN_HEADERS, timeout=8)
+            if resp.status_code != 200:
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                return info
+            soup = BeautifulSoup(resp.text, "lxml")
 
-        # 豆瓣标签作为分类
-        tags = soup.select(".tags-body a")
-        if tags:
-            info["category"] = " / ".join(t.get_text(strip=True) for t in tags[:4])
+            info_div = soup.select_one("#info")
+            if info_div:
+                text = info_div.get_text(" ", strip=True)
+                # 提取作者
+                author_match = re.search(r"作者[:：]\s*([^\n]+?)(?:\s*出版|$)", text)
+                if author_match:
+                    info["author"] = author_match.group(1).strip()[:60]
+                # 提取出版社/类别作为 fallback
+                pub_match = re.search(r"出版社[:：]\s*([^\s]+)", text)
+                if pub_match:
+                    info["category"] = pub_match.group(1).strip()
 
-        # 评分
-        rating_el = soup.select_one(".ll.rating_num")
-        if rating_el:
-            info["rating"] = rating_el.get_text(strip=True)
+            # 豆瓣标签作为分类
+            tags = soup.select(".tags-body a")
+            if tags:
+                info["category"] = " / ".join(t.get_text(strip=True) for t in tags[:4])
 
-        # 简介
-        intro_el = soup.select_one("#link-report .intro") or soup.select_one(".related_info .intro")
-        if intro_el:
-            paras = intro_el.find_all("p")
-            intro_text = " ".join(p.get_text(strip=True) for p in paras if p.get_text(strip=True))
-            info["intro"] = intro_text[:400] if intro_text else ""
+            # 评分
+            rating_el = soup.select_one(".ll.rating_num")
+            if rating_el:
+                info["rating"] = rating_el.get_text(strip=True)
 
-        time.sleep(0.8)
-    except Exception as e:
-        print(f"    [警告] 书籍详情抓取失败 {url}: {e}")
+            # 简介
+            intro_el = soup.select_one("#link-report .intro") or soup.select_one(".related_info .intro")
+            if intro_el:
+                paras = intro_el.find_all("p")
+                intro_text = " ".join(p.get_text(strip=True) for p in paras if p.get_text(strip=True))
+                info["intro"] = intro_text[:400] if intro_text else ""
+
+            time.sleep(0.8)
+            return info  # 成功则返回
+        except Exception as e:
+            print(f"    [警告] 书籍详情抓取失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
     return info
 
 
-def fetch_douban_weekly_books(top_n=5):
-    """抓取豆瓣每周书榜 Top N"""
+def fetch_douban_weekly_books(top_n=5, max_retries=3, timeout_seconds=60):
+    """抓取豆瓣每周书榜 Top N，带重试和超时保护"""
+    import signal
+
+    def timeout_handler(signum, frame):
+        raise TimeoutError("豆瓣抓取超时")
+
     books = []
+    start_time = time.time()
+
     for chart_url in DOUBAN_CHART_URLS:
-        try:
-            resp = _douban_get(chart_url)
-            if resp is None:
-                continue
-            soup = BeautifulSoup(resp.text, "lxml")
+        # 检查总超时
+        if time.time() - start_time > timeout_seconds:
+            print(f"  [警告] 豆瓣抓取总超时 ({timeout_seconds}s)，返回已获取的 {len(books)} 本书")
+            break
 
-            # 尝试多种选择器
-            items = (
-                soup.select(".media.clearfix") or
-                soup.select("li.media") or
-                soup.select(".chart-dashed-list li")
-            )
-            if not items:
-                continue
+        for attempt in range(max_retries):
+            try:
+                resp = requests.get(chart_url, headers=DOUBAN_HEADERS, timeout=10)
+                if resp.status_code != 200:
+                    if attempt < max_retries - 1:
+                        print(f"    [重试] 状态码 {resp.status_code}，尝试 {attempt + 2}/{max_retries}")
+                        time.sleep(2)
+                        continue
+                    else:
+                        break
+                soup = BeautifulSoup(resp.text, "lxml")
 
-            for item in items[:top_n]:
-                title_el = item.select_one("h2 a") or item.select_one("a[title]")
-                if not title_el:
-                    continue
-                title = title_el.get_text(strip=True)
-                link = title_el.get("href", "")
+                # 尝试多种选择器
+                items = (
+                    soup.select(".media.clearfix") or
+                    soup.select("li.media") or
+                    soup.select(".chart-dashed-list li")
+                )
+                if not items:
+                    if attempt < max_retries - 1:
+                        print(f"    [重试] 未找到书籍列表，尝试 {attempt + 2}/{max_retries}")
+                        time.sleep(2)
+                        continue
+                    else:
+                        break
 
-                # 尝试从列表页获取基础信息
-                meta_el = item.select_one(".color-gray") or item.select_one("p.author")
-                meta_text = meta_el.get_text(" ", strip=True) if meta_el else ""
+                for item in items[:top_n]:
+                    # 检查总超时
+                    if time.time() - start_time > timeout_seconds:
+                        print(f"  [警告] 豆瓣抓取总超时，返回已获取的 {len(books)} 本书")
+                        return books[:top_n]
 
-                print(f"    📖 {title[:40]}...")
-                detail = fetch_douban_book_detail(link) if link else {}
+                    title_el = item.select_one("h2 a") or item.select_one("a[title]")
+                    if not title_el:
+                        continue
+                    title = title_el.get_text(strip=True)
+                    link = title_el.get("href", "")
 
-                books.append({
-                    "title": title,
-                    "link": link,
-                    "author": detail.get("author") or meta_text[:60],
-                    "category": detail.get("category", ""),
-                    "rating": detail.get("rating", ""),
-                    "intro": detail.get("intro", ""),
-                })
+                    # 尝试从列表页获取基础信息
+                    meta_el = item.select_one(".color-gray") or item.select_one("p.author")
+                    meta_text = meta_el.get_text(" ", strip=True) if meta_el else ""
 
-            if books:
-                break  # 成功拿到数据就不继续尝试
-        except Exception as e:
-            print(f"  [警告] 豆瓣榜单抓取失败 {chart_url}: {e}")
+                    print(f"    📖 {title[:40]}...")
+                    detail = fetch_douban_book_detail(link) if link else {}
 
-    return books
+                    books.append({
+                        "title": title,
+                        "link": link,
+                        "author": detail.get("author") or meta_text[:60],
+                        "category": detail.get("category", ""),
+                        "rating": detail.get("rating", ""),
+                        "intro": detail.get("intro", ""),
+                    })
+
+                if books:
+                    return books[:top_n]  # 成功拿到数据就返回
+                break  # 成功解析但没数据，跳出重试循环
+
+            except Exception as e:
+                print(f"  [警告] 豆瓣榜单抓取失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+
+    return books[:top_n]
 
 
 # ── 生成 Word 文档 ────────────────────────────────────────────────
